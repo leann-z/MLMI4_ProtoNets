@@ -7,7 +7,7 @@ Returns one episode as:
     query_y    int64   tensor [N_way*N_query]  labels 0..N_way-1
 
 Usage:
-    from episode_sampler import get_sampler
+    from data import get_sampler
     sampler = get_sampler("miniimagenet"/"omniglot", "train"/"val"/"test")
     support_x, support_y, query_x, query_y = sampler(n_way=n_way, n_shot=n_shot, n_query=n_query)
 """
