@@ -1,7 +1,6 @@
 # ProtoNet: prototype-based few-shot classifier (Snell et al. 2017)
-# forward() returns logits [N_query, n_way] — pass directly to nn.CrossEntropyLoss
+# forward() returns logits [N_query, n_way],  pass directly to nn.CrossEntropyLoss
 # support_labels must be contiguous integers [0, n_way), remapping needed
-
 from __future__ import annotations
 
 import torch

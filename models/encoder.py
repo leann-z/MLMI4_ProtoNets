@@ -6,7 +6,6 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import warnings
 
 
 class ConvBlock(nn.Module):
@@ -38,9 +37,6 @@ class ProtoNetEncoder(nn.Module):
         flatten: bool = True,
     ):
         super().__init__()
-
-        if num_blocks != 4:
-            warnings.warn(f"Paper uses 4 blocks; got {num_blocks}")
 
         layers = []
         c_in = in_channels
