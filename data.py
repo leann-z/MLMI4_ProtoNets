@@ -222,35 +222,3 @@ def get_sampler(dataset: str, split: str):
 
     sampler.index = index   # expose for inspection
     return sampler
-
-
-# ---------------------------------------------------------------------------
-# Quick smoke-test
-# ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    for dataset in ("omniglot", "miniimagenet"):
-        s = get_sampler(dataset, "train")
-        sx, sy, qx, qy = s(n_way=5, n_shot=1, n_query=15)
-        print(f"{dataset}")
-        print(f"  classes in index : {len(s.index)}")
-        print(f"  support_x        : {sx.shape}  dtype={sx.dtype}  "
-              f"min={sx.min():.2f} max={sx.max():.2f}")
-        print(f"  support_y        : {sy.tolist()}")
-        print(f"  query_x          : {qx.shape}")
-        print(f"  query_y          : {qy.tolist()}")
-
-    # CUB — all three splits, same interface as other datasets
-    for split in ("train", "val", "test"):
-        s = get_sampler("cub", split)
-        sx, sy, qx, qy, cids = s(n_way=5, n_shot=1, n_query=10)
-        print(f"cub/{split}")
-        print(f"  classes available : {len(s.index)}")
-        print(f"  support_x         : {sx.shape}  dtype={sx.dtype}")
-        print(f"  support_y         : {sy.tolist()}")
-        print(f"  query_x           : {qx.shape}  dtype={qx.dtype}")
-        print(f"  query_y           : {qy[:10].tolist()} …")
-        print(f"  class_ids         : {cids.tolist()}")
-        # example of how the model looks up the episode's attribute vectors:
-        attrs = s.class_attrs[cids - 1]   # (n_way, 312)
-        print(f"  episode attrs     : {attrs.shape}")
