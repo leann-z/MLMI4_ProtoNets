@@ -1,20 +1,35 @@
 """Episodic sampler for few-shot learning (Prototypical Networks).
 
-Returns one episode as:
-    support_x  float32 tensor [N_way*N_shot,  C, H, W]
-    support_y  int64   tensor [N_way*N_shot]   labels 0..N_way-1
-    query_x    float32 tensor [N_way*N_query, C, H, W]
-    query_y    int64   tensor [N_way*N_query]  labels 0..N_way-1
+All datasets return one episode as:
+    support_x  float32 tensor [N_way*N_shot,  ...]   image (C,H,W) or feature (1024,)
+    support_y  int64   tensor [N_way*N_shot]          labels 0..N_way-1
+    query_x    float32 tensor [N_way*N_query, ...]   image (C,H,W) or feature (1024,)
+    query_y    int64   tensor [N_way*N_query]         labels 0..N_way-1
 
-Usage:
-    from data import get_sampler
-    sampler = get_sampler("miniimagenet"/"omniglot", "train"/"val"/"test")
-    support_x, support_y, query_x, query_y = sampler(n_way=n_way, n_shot=n_shot, n_query=n_query)
+Usage — miniImageNet / Omniglot:
+    sampler = get_sampler("miniimagenet", "train")   # or "omniglot"
+    support_x, support_y, query_x, query_y = sampler(n_way=5, n_shot=1, n_query=15)
+    # x tensors are images: (N, C, H, W)
+
+Usage — CUB (zero-shot, paper config):
+    sampler = get_sampler("cub", "train")   # or "val" / "test"
+    support_x, support_y, query_x, query_y, class_ids = sampler(n_way=50, n_shot=0, n_query=10)
+    # x tensors are 1,024-dim GoogLeNet features, NOT images
+    # class_ids: int64 tensor (n_way,) — original CUB class IDs (1-indexed)
+    #            episode label i corresponds to class_ids[i]
+    #
+    # To get the 312-dim attribute vectors for this episode's classes:
+    episode_attrs = sampler.class_attrs[class_ids - 1]   # (n_way, 312)
+    #
+    # Typical model use:
+    #   prototypes = F.normalize(g(episode_attrs), dim=-1)   # (n_way, 1024)
+    #   logits     = -torch.cdist(f(query_x), prototypes)**2
 """
 
 import random
 from pathlib import Path
 
+import numpy as np
 import torch
 from jaxtyping import Float, Int
 from PIL import Image
@@ -112,18 +127,93 @@ DATASET_ROOTS = {
 }
 
 
+# ---------------------------------------------------------------------------
+# CUB zero-shot episode sampler
+# ---------------------------------------------------------------------------
+
+def build_cub_index(features, labels):
+    """Return {class_id: array of row indices} from the feature matrix."""
+    index = {}
+    for i, lbl in enumerate(labels):
+        index.setdefault(int(lbl), []).append(i)
+    return index
+
+
+def sample_cub_episode(
+    features,   # (N, 1024) float32 numpy array
+    labels,     # (N,)      int32  numpy array
+    index,      # {class_id: [row indices]}
+    n_way: int,
+    n_shot: int,
+    n_query: int,
+) -> tuple[
+    Float[torch.Tensor, "nway_nshot 1024"],
+    Int[torch.Tensor, "nway_nshot"],
+    Float[torch.Tensor, "nway_nquery 1024"],
+    Int[torch.Tensor, "nway_nquery"],
+    Int[torch.Tensor, "nway"],
+]:
+    """Sample one N-way episode for CUB; returns feature vectors instead of images.
+
+    Also returns class_ids (shape: n_way) — the original CUB class IDs (1-indexed)
+    for the selected classes, in episode-label order (episode label 0 → class_ids[0]).
+    The model uses these to look up sampler.class_attrs[class_ids - 1] for prototypes.
+    """
+    class_ids = random.sample(list(index.keys()), n_way)
+
+    support_feats, support_labels = [], []
+    query_feats,   query_labels   = [], []
+
+    for episode_label, cid in enumerate(class_ids):
+        rows = random.sample(index[cid], n_shot + n_query)
+        support_feats.append(features[rows[:n_shot]])
+        support_labels.extend([episode_label] * n_shot)
+        query_feats.append(features[rows[n_shot:]])
+        query_labels.extend([episode_label] * n_query)
+
+    support_x = torch.tensor(np.concatenate(support_feats), dtype=torch.float32) if n_shot > 0 else torch.zeros(0, features.shape[1])
+    support_y = torch.tensor(support_labels, dtype=torch.int64)
+    query_x   = torch.tensor(np.concatenate(query_feats),   dtype=torch.float32)
+    query_y   = torch.tensor(query_labels,                  dtype=torch.int64)
+    class_ids = torch.tensor(class_ids,                     dtype=torch.int64)  # (n_way,)
+
+    return support_x, support_y, query_x, query_y, class_ids
+
+
+# ---------------------------------------------------------------------------
+# Convenience: build sampler for a given dataset + split
+# ---------------------------------------------------------------------------
+
 def get_sampler(dataset: str, split: str):
     """Return a callable that produces one episode when called.
 
     Args:
-        dataset: 'miniimagenet' or 'omniglot'
+        dataset: 'miniimagenet', 'omniglot', or 'cub'
         split:   'train', 'val', or 'test'
 
     Returns:
-        sampler(n_way, n_shot, n_query) → (support_x, support_y, query_x, query_y)
+        For image datasets:
+            sampler(n_way, n_shot, n_query) → (support_x, support_y, query_x, query_y)
+        For 'cub' (zero-shot):
+            sampler(n_way, n_query) → (support_attrs, query_x, query_y)
     """
-    root      = DATASET_ROOTS[dataset] / split
-    transform = TRANSFORMS[dataset]
+    if dataset == "cub":
+        data     = np.load(Path("data/CUB_200_2011/features") / f"{split}_features.npz")
+        features = data["features"]   # (N, 1024)
+        labels   = data["labels"]     # (N,)
+        index    = build_cub_index(features, labels)
+
+        def sampler(n_way: int, n_shot: int, n_query: int):
+            return sample_cub_episode(features, labels, index, n_way, n_shot, n_query)
+
+        sampler.index       = index
+        # class_attrs[i] is the 312-dim attribute vector for CUB class id (i+1).
+        # The model uses this to build prototypes via g: R^312 → R^1024.
+        sampler.class_attrs = torch.tensor(data["class_attrs"], dtype=torch.float32)
+        return sampler
+
+    root       = DATASET_ROOTS[dataset] / split
+    transform  = TRANSFORMS[dataset]
     index      = build_index(root)
     image_mode = IMAGE_MODE[dataset]
 
@@ -132,3 +222,35 @@ def get_sampler(dataset: str, split: str):
 
     sampler.index = index   # expose for inspection
     return sampler
+
+
+# ---------------------------------------------------------------------------
+# Quick smoke-test
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    for dataset in ("omniglot", "miniimagenet"):
+        s = get_sampler(dataset, "train")
+        sx, sy, qx, qy = s(n_way=5, n_shot=1, n_query=15)
+        print(f"{dataset}")
+        print(f"  classes in index : {len(s.index)}")
+        print(f"  support_x        : {sx.shape}  dtype={sx.dtype}  "
+              f"min={sx.min():.2f} max={sx.max():.2f}")
+        print(f"  support_y        : {sy.tolist()}")
+        print(f"  query_x          : {qx.shape}")
+        print(f"  query_y          : {qy.tolist()}")
+
+    # CUB — all three splits, same interface as other datasets
+    for split in ("train", "val", "test"):
+        s = get_sampler("cub", split)
+        sx, sy, qx, qy, cids = s(n_way=5, n_shot=1, n_query=10)
+        print(f"cub/{split}")
+        print(f"  classes available : {len(s.index)}")
+        print(f"  support_x         : {sx.shape}  dtype={sx.dtype}")
+        print(f"  support_y         : {sy.tolist()}")
+        print(f"  query_x           : {qx.shape}  dtype={qx.dtype}")
+        print(f"  query_y           : {qy[:10].tolist()} …")
+        print(f"  class_ids         : {cids.tolist()}")
+        # example of how the model looks up the episode's attribute vectors:
+        attrs = s.class_attrs[cids - 1]   # (n_way, 312)
+        print(f"  episode attrs     : {attrs.shape}")
