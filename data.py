@@ -1,73 +1,93 @@
-"""Episodic sampler for few-shot learning (Prototypical Networks).
+"""Episodic sampler for few-shot learning.
 
-All datasets return one episode as:
-    support_x  float32 tensor [N_way*N_shot,  ...]   image (C,H,W) or feature (1024,)
-    support_y  int64   tensor [N_way*N_shot]          labels 0..N_way-1
-    query_x    float32 tensor [N_way*N_query, ...]   image (C,H,W) or feature (1024,)
-    query_y    int64   tensor [N_way*N_query]         labels 0..N_way-1
-
-Usage — miniImageNet / Omniglot:
-    sampler = get_sampler("miniimagenet", "train")   # or "omniglot"
-    support_x, support_y, query_x, query_y = sampler(n_way=5, n_shot=1, n_query=15)
-    # x tensors are images: (N, C, H, W)
-
-Usage — CUB (zero-shot, paper config):
-    sampler = get_sampler("cub", "train")   # or "val" / "test"
-    support_x, support_y, query_x, query_y, class_ids = sampler(n_way=50, n_shot=0, n_query=10)
-    # x tensors are 1,024-dim GoogLeNet features, NOT images
-    # class_ids: int64 tensor (n_way,) — original CUB class IDs (1-indexed)
-    #            episode label i corresponds to class_ids[i]
-    #
-    # To get the 312-dim attribute vectors for this episode's classes:
-    episode_attrs = sampler.class_attrs[class_ids - 1]   # (n_way, 312)
-    #
-    # Typical model use:
-    #   prototypes = F.normalize(g(episode_attrs), dim=-1)   # (n_way, 1024)
-    #   logits     = -torch.cdist(f(query_x), prototypes)**2
+CUB class IDs are 1-indexed. To get the 312-dim attribute vectors for an episode:
+    episode_attrs = sampler.class_attrs[episode.class_ids - 1]  # (n_way, 312)
+Typical zero-shot use: prototypes = F.normalize(g(episode_attrs), dim=-1)  # (n_way, 1024)
 """
 
+from __future__ import annotations
+
 import random
+from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 import torch
 from jaxtyping import Float, Int
 from PIL import Image
+from torch import Tensor
 from torchvision import transforms
 
 
-# ---------------------------------------------------------------------------
-# Per-dataset transforms
-# ---------------------------------------------------------------------------
+class Dataset(Enum):
+    MINI_IMAGENET = "miniimagenet"
+    OMNIGLOT = "omniglot"
+    CUB = "cub"
 
-TRANSFORMS = {
-    "miniimagenet": transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                             std= [0.229, 0.224, 0.225]),
-    ]),
-    "omniglot": transforms.Compose([
-        transforms.Resize((28, 28)),
-        transforms.ToTensor(),
-        transforms.Lambda(lambda x: 1.0 - x),
-        transforms.Normalize(mean=[0.0782], std=[0.2685]),
-    ]),
+
+class Split(Enum):
+    TRAIN = "train"
+    VAL = "val"
+    TEST = "test"
+
+
+class ImageMode(Enum):
+    RGB = "RGB"
+    GRAYSCALE = "L"
+
+
+@dataclass(frozen=True)
+class ImageDatasetConfig:
+    root: Path
+    transform: transforms.Compose
+    image_mode: ImageMode
+
+
+_IMAGE_DATASET_CONFIGS: dict[Dataset, ImageDatasetConfig] = {
+    Dataset.MINI_IMAGENET: ImageDatasetConfig(
+        root=Path("data/miniImageNet"),
+        transform=transforms.Compose(
+            [
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ],
+        ),
+        image_mode=ImageMode.RGB,
+    ),
+    Dataset.OMNIGLOT: ImageDatasetConfig(
+        root=Path("data/Omniglot"),
+        transform=transforms.Compose(
+            [
+                transforms.Resize((28, 28)),
+                transforms.ToTensor(),
+                transforms.Lambda(lambda x: 1.0 - x),
+                transforms.Normalize(mean=[0.0782], std=[0.2685]),
+            ],
+        ),
+        image_mode=ImageMode.GRAYSCALE,
+    ),
 }
 
-# PIL mode to use when opening images
-IMAGE_MODE = {
-    "miniimagenet": "RGB",
-    "omniglot":     "L",
-}
+
+class ImageEpisode(NamedTuple):
+    support_x: Float[Tensor, "n_support channels height width"]
+    support_y: Int[Tensor, " n_support"]
+    query_x: Float[Tensor, "n_query channels height width"]
+    query_y: Int[Tensor, " n_query"]
 
 
-# ---------------------------------------------------------------------------
-# Dataset index: maps class_name → list of image paths
-# ---------------------------------------------------------------------------
+class CubEpisode(NamedTuple):
+    support_x: Float[Tensor, "n_support feature_dim"]
+    support_y: Int[Tensor, " n_support"]
+    query_x: Float[Tensor, "n_query feature_dim"]
+    query_y: Int[Tensor, " n_query"]
+    class_ids: Int[Tensor, " n_way"]
+
 
 def build_index(root: Path) -> dict[str, list[Path]]:
-    """Scan root/<class>/*.{jpg,png} and return class → [paths] mapping."""
-    index = {}
+    index: dict[str, list[Path]] = {}
     for class_dir in sorted(root.iterdir()):
         if not class_dir.is_dir():
             continue
@@ -77,148 +97,126 @@ def build_index(root: Path) -> dict[str, list[Path]]:
     return index
 
 
-# ---------------------------------------------------------------------------
-# Episode sampler
-# ---------------------------------------------------------------------------
-
 def sample_episode(
     index: dict[str, list[Path]],
-    transform,
+    transform: transforms.Compose,
     n_way: int,
     n_shot: int,
     n_query: int,
-    image_mode: str = "RGB",
-) -> tuple[
-    Float[torch.Tensor, "nway_nshot C H W"],
-    Int[torch.Tensor, "nway_nshot"],
-    Float[torch.Tensor, "nway_nquery C H W"],
-    Int[torch.Tensor, "nway_nquery"],
-]:
-    """Sample one N-way K-shot episode from a class index."""
+    *,
+    image_mode: ImageMode = ImageMode.RGB,
+) -> ImageEpisode:
     classes = random.sample(list(index.keys()), n_way)
 
-    support_imgs, support_labels = [], []
-    query_imgs,   query_labels   = [], []
+    support_imgs: list[Tensor] = []
+    support_labels: list[int] = []
+    query_imgs: list[Tensor] = []
+    query_labels: list[int] = []
 
-    for label, cls in enumerate(classes):
-        paths = random.sample(index[cls], n_shot + n_query)
-        for p in paths[:n_shot]:
-            support_imgs.append(transform(Image.open(p).convert(image_mode)))
+    for label, class_name in enumerate(classes):
+        paths = random.sample(index[class_name], n_shot + n_query)
+        for path in paths[:n_shot]:
+            support_imgs.append(transform(Image.open(path).convert(image_mode.value)))
             support_labels.append(label)
-        for p in paths[n_shot:]:
-            query_imgs.append(transform(Image.open(p).convert(image_mode)))
+        for path in paths[n_shot:]:
+            query_imgs.append(transform(Image.open(path).convert(image_mode.value)))
             query_labels.append(label)
 
-    support_x = torch.stack(support_imgs)           # [N_way*N_shot,  C, H, W]
-    support_y = torch.tensor(support_labels)        # [N_way*N_shot]
-    query_x   = torch.stack(query_imgs)             # [N_way*N_query, C, H, W]
-    query_y   = torch.tensor(query_labels)          # [N_way*N_query]
+    support_x = torch.stack(support_imgs)
+    support_y = torch.tensor(support_labels)
+    query_x = torch.stack(query_imgs)
+    query_y = torch.tensor(query_labels)
 
-    return support_x, support_y, query_x, query_y
+    assert isinstance(support_x, Float[Tensor, " n_support channels height width"])  # type: ignore
+    assert isinstance(support_y, Int[Tensor, "n_support"])  # type: ignore
+    assert isinstance(query_x, Float[Tensor, "n_query channels height width"])  # type: ignore
+    assert isinstance(query_y, Int[Tensor, " n_query"])  # type: ignore
 
-
-# ---------------------------------------------------------------------------
-# Convenience: build sampler for a given dataset + split
-# ---------------------------------------------------------------------------
-
-DATASET_ROOTS = {
-    "miniimagenet": Path("data/miniImageNet"),
-    "omniglot":     Path("data/Omniglot"),
-}
+    return ImageEpisode(support_x, support_y, query_x, query_y)
 
 
-# ---------------------------------------------------------------------------
-# CUB zero-shot episode sampler
-# ---------------------------------------------------------------------------
-
-def build_cub_index(features, labels):
-    """Return {class_id: array of row indices} from the feature matrix."""
-    index = {}
-    for i, lbl in enumerate(labels):
-        index.setdefault(int(lbl), []).append(i)
+def build_cub_index(labels: np.ndarray) -> dict[int, list[int]]:
+    index: dict[int, list[int]] = {}
+    for row, label in enumerate(labels):
+        index.setdefault(int(label), []).append(row)
     return index
 
 
 def sample_cub_episode(
-    features,   # (N, 1024) float32 numpy array
-    labels,     # (N,)      int32  numpy array
-    index,      # {class_id: [row indices]}
+    features: np.ndarray,
+    index: dict[int, list[int]],
     n_way: int,
     n_shot: int,
     n_query: int,
-) -> tuple[
-    Float[torch.Tensor, "nway_nshot 1024"],
-    Int[torch.Tensor, "nway_nshot"],
-    Float[torch.Tensor, "nway_nquery 1024"],
-    Int[torch.Tensor, "nway_nquery"],
-    Int[torch.Tensor, "nway"],
-]:
-    """Sample one N-way episode for CUB; returns feature vectors instead of images.
+) -> CubEpisode:
+    class_ids_list = random.sample(list(index.keys()), n_way)
 
-    Also returns class_ids (shape: n_way) — the original CUB class IDs (1-indexed)
-    for the selected classes, in episode-label order (episode label 0 → class_ids[0]).
-    The model uses these to look up sampler.class_attrs[class_ids - 1] for prototypes.
-    """
-    class_ids = random.sample(list(index.keys()), n_way)
+    support_feats: list[np.ndarray] = []
+    support_labels: list[int] = []
+    query_feats: list[np.ndarray] = []
+    query_labels: list[int] = []
 
-    support_feats, support_labels = [], []
-    query_feats,   query_labels   = [], []
-
-    for episode_label, cid in enumerate(class_ids):
-        rows = random.sample(index[cid], n_shot + n_query)
+    for episode_label, class_id in enumerate(class_ids_list):
+        rows = random.sample(index[class_id], n_shot + n_query)
         support_feats.append(features[rows[:n_shot]])
         support_labels.extend([episode_label] * n_shot)
         query_feats.append(features[rows[n_shot:]])
         query_labels.extend([episode_label] * n_query)
 
-    support_x = torch.tensor(np.concatenate(support_feats), dtype=torch.float32) if n_shot > 0 else torch.zeros(0, features.shape[1])
+    support_x = (
+        torch.tensor(np.concatenate(support_feats), dtype=torch.float32)
+        if n_shot > 0
+        else torch.zeros(0, features.shape[1])
+    )
     support_y = torch.tensor(support_labels, dtype=torch.int64)
-    query_x   = torch.tensor(np.concatenate(query_feats),   dtype=torch.float32)
-    query_y   = torch.tensor(query_labels,                  dtype=torch.int64)
-    class_ids = torch.tensor(class_ids,                     dtype=torch.int64)  # (n_way,)
+    query_x = torch.tensor(np.concatenate(query_feats), dtype=torch.float32)
+    query_y = torch.tensor(query_labels, dtype=torch.int64)
+    class_ids = torch.tensor(class_ids_list, dtype=torch.int64)
 
-    return support_x, support_y, query_x, query_y, class_ids
+    assert isinstance(support_x, Float[Tensor, "n_support feature_dim"])  # type: ignore
+    assert isinstance(support_y, Int[Tensor, " n_support"])  # type: ignore
+    assert isinstance(query_x, Float[Tensor, "n_query feature_dim"])  # type: ignore
+    assert isinstance(query_y, Int[Tensor, " n_query"])  # type: ignore
+    assert isinstance(class_ids, Int[Tensor, " n_way"])  # type: ignore
+
+    return CubEpisode(support_x, support_y, query_x, query_y, class_ids)
 
 
-# ---------------------------------------------------------------------------
-# Convenience: build sampler for a given dataset + split
-# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class ImageEpisodeSampler:
+    index: dict[str, list[Path]]
+    config: ImageDatasetConfig
 
-def get_sampler(dataset: str, split: str):
-    """Return a callable that produces one episode when called.
+    def __call__(self, n_way: int, n_shot: int, n_query: int) -> ImageEpisode:
+        return sample_episode(
+            self.index,
+            self.config.transform,
+            n_way,
+            n_shot,
+            n_query,
+            image_mode=self.config.image_mode,
+        )
 
-    Args:
-        dataset: 'miniimagenet', 'omniglot', or 'cub'
-        split:   'train', 'val', or 'test'
 
-    Returns:
-        For image datasets:
-            sampler(n_way, n_shot, n_query) → (support_x, support_y, query_x, query_y)
-        For 'cub' (zero-shot):
-            sampler(n_way, n_query) → (support_attrs, query_x, query_y)
-    """
-    if dataset == "cub":
-        data     = np.load(Path("data/CUB_200_2011/features") / f"{split}_features.npz")
-        features = data["features"]   # (N, 1024)
-        labels   = data["labels"]     # (N,)
-        index    = build_cub_index(features, labels)
+@dataclass(frozen=True)
+class CubEpisodeSampler:
+    features: np.ndarray
+    index: dict[int, list[int]]
+    class_attrs: Float[Tensor, " n_classes attr_dim"]
 
-        def sampler(n_way: int, n_shot: int, n_query: int):
-            return sample_cub_episode(features, labels, index, n_way, n_shot, n_query)
+    def __call__(self, n_way: int, n_shot: int, n_query: int) -> CubEpisode:
+        return sample_cub_episode(self.features, self.index, n_way, n_shot, n_query)
 
-        sampler.index       = index
-        # class_attrs[i] is the 312-dim attribute vector for CUB class id (i+1).
-        # The model uses this to build prototypes via g: R^312 → R^1024.
-        sampler.class_attrs = torch.tensor(data["class_attrs"], dtype=torch.float32)
-        return sampler
 
-    root       = DATASET_ROOTS[dataset] / split
-    transform  = TRANSFORMS[dataset]
-    index      = build_index(root)
-    image_mode = IMAGE_MODE[dataset]
+def get_sampler(dataset: Dataset, split: Split) -> ImageEpisodeSampler | CubEpisodeSampler:
+    if dataset == Dataset.CUB:
+        data = np.load(Path("data/CUB_200_2011/features") / f"{split.value}_features.npz")
+        return CubEpisodeSampler(
+            features=data["features"],
+            index=build_cub_index(data["labels"]),
+            class_attrs=torch.tensor(data["class_attrs"], dtype=torch.float32),
+        )
 
-    def sampler(n_way: int, n_shot: int, n_query: int):
-        return sample_episode(index, transform, n_way, n_shot, n_query, image_mode)
-
-    sampler.index = index   # expose for inspection
-    return sampler
+    config = _IMAGE_DATASET_CONFIGS[dataset]
+    index = build_index(config.root / split.value)
+    return ImageEpisodeSampler(index=index, config=config)
