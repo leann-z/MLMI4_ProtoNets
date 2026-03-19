@@ -17,16 +17,19 @@ from __future__ import annotations
 
 import argparse
 import json
-from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-import matplotlib
+import matplotlib as mpl
 import matplotlib.pyplot as plt
-import numpy as np
 
-# ---------- Nature style constants ----------
+if TYPE_CHECKING:
+    from collections.abc import Callable
+import numpy as np
+from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
 
 MM_TO_INCHES = 1.0 / 25.4
 SINGLE_COL_MM = 89
@@ -50,8 +53,8 @@ PALETTE = [BLUE, VERMILLION, BLUISH_GREEN, SKY_BLUE, REDDISH_PURPLE, YELLOW, BLA
 
 
 def _setup_nature_style() -> None:
-    matplotlib.rcParams["pdf.fonttype"] = 42
-    matplotlib.rcParams["ps.fonttype"] = 42
+    mpl.rcParams["pdf.fonttype"] = 42
+    mpl.rcParams["ps.fonttype"] = 42
     plt.rcParams.update({
         "font.family": "sans-serif",
         "font.sans-serif": ["Helvetica", "Arial", "DejaVu Sans"],
@@ -76,8 +79,6 @@ def _setup_nature_style() -> None:
         "savefig.pad_inches": 0.02,
     })
 
-
-# ---------- Data loading ----------
 
 @dataclass(frozen=True)
 class ResultEntry:
@@ -119,8 +120,6 @@ def _save_fig(fig: plt.Figure, output_dir: Path, name: str) -> None:
     print(f"Saved: {output_dir / name}.{{pdf,png}}")
 
 
-# ---------- P1: Omniglot few-shot (Table 1) ----------
-
 def plot_omniglot_fewshot(results_dir: Path, output_dir: Path) -> None:
     entries = load_results(results_dir, "omniglot_fewshot")
     if not entries:
@@ -133,13 +132,16 @@ def plot_omniglot_fewshot(results_dir: Path, output_dir: Path) -> None:
     entries_sorted = sorted(entries, key=lambda x: (x.n_way_test, x.n_shot_test))
     labels = [f"{e.n_way_test}-way {e.n_shot_test}-shot" for e in entries_sorted]
     means = [e.accuracy_mean * 100 for e in entries_sorted]
+    ci95s = [e.accuracy_ci95 * 100 for e in entries_sorted]
 
     x = np.arange(len(labels))
     colors = [PALETTE[i % len(PALETTE)] for i in range(len(labels))]
-    bars = ax.bar(x, means, width=0.55, color=colors, edgecolor=BLACK, linewidth=0.3)
+    bars = ax.bar(x, means, yerr=ci95s, width=0.55, capsize=2,
+                  color=colors, edgecolor=BLACK, linewidth=0.3,
+                  error_kw={"linewidth": 0.5})
 
-    for bar, val in zip(bars, means, strict=True):
-        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.15,
+    for bar, val, ci in zip(bars, means, ci95s, strict=True):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + ci + 0.15,
                 f"{val:.1f}", ha="center", va="bottom", fontsize=5)
 
     ax.set_xticks(x)
@@ -151,8 +153,6 @@ def plot_omniglot_fewshot(results_dir: Path, output_dir: Path) -> None:
     fig.tight_layout()
     _save_fig(fig, output_dir, "omniglot_fewshot")
 
-
-# ---------- P2: miniImageNet few-shot (Table 2) ----------
 
 def plot_miniimagenet_fewshot(results_dir: Path, output_dir: Path) -> None:
     entries = load_results(results_dir, "miniimagenet_fewshot")
@@ -187,8 +187,6 @@ def plot_miniimagenet_fewshot(results_dir: Path, output_dir: Path) -> None:
     _save_fig(fig, output_dir, "miniimagenet_fewshot")
 
 
-# ---------- P3: Distance & way comparison (Figure 2) ----------
-
 def plot_distance_way_comparison(results_dir: Path, output_dir: Path) -> None:
     entries = load_results(results_dir, "miniimagenet_distance_way")
     if not entries:
@@ -202,24 +200,27 @@ def plot_distance_way_comparison(results_dir: Path, output_dir: Path) -> None:
         ax.text(-0.12, 1.05, label, transform=ax.transAxes,
                 fontsize=8, fontweight="bold", va="top")
 
-        shot_entries = sorted(
-            [e for e in entries if e.n_shot_test == shot],
-            key=lambda x: (x.distance, x.train_way),
-        )
+        shot_entries = [e for e in entries if e.n_shot_test == shot]
+        train_ways = sorted({e.train_way for e in shot_entries})
+        cosine_by_way = {e.train_way: e for e in shot_entries if e.distance == "cosine"}
+        euclidean_by_way = {e.train_way: e for e in shot_entries if e.distance == "euclidean"}
 
-        group_labels = [f"{e.train_way}-way\n{e.distance}" for e in shot_entries]
-        means = [e.accuracy_mean * 100 for e in shot_entries]
-        ci95s = [e.accuracy_ci95 * 100 for e in shot_entries]
-        colors = [REDDISH_PURPLE if e.distance == "cosine" else BLUE for e in shot_entries]
+        group_labels = [f"{w}-way" for w in train_ways]
+        x = np.arange(len(train_ways))
+        width = 0.35
 
-        x = np.arange(len(group_labels))
-        bars = ax.bar(x, means, yerr=ci95s, width=0.55, capsize=2,
-                      color=colors, edgecolor=BLACK, linewidth=0.3,
-                      error_kw={"linewidth": 0.5})
-
-        for bar, val, ci in zip(bars, means, ci95s, strict=True):
-            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + ci + 0.3,
-                    f"{val:.1f}", ha="center", va="bottom", fontsize=5)
+        for offset, by_way, color in [
+            (-width / 2, cosine_by_way, REDDISH_PURPLE),
+            (width / 2, euclidean_by_way, BLUE),
+        ]:
+            means = [by_way[w].accuracy_mean * 100 for w in train_ways]
+            ci95s = [by_way[w].accuracy_ci95 * 100 for w in train_ways]
+            bars = ax.bar(x + offset, means, width, yerr=ci95s, capsize=2,
+                          color=color, edgecolor=BLACK, linewidth=0.3,
+                          error_kw={"linewidth": 0.5})
+            for bar, val, ci in zip(bars, means, ci95s, strict=True):
+                ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + ci + 0.3,
+                        f"{val:.1f}", ha="center", va="bottom", fontsize=5)
 
         ax.set_xticks(x)
         ax.set_xticklabels(group_labels)
@@ -227,8 +228,6 @@ def plot_distance_way_comparison(results_dir: Path, output_dir: Path) -> None:
         ax.set_title(f"{shot}-shot", fontweight="bold")
         ax.set_ylim(20, 80)
 
-    # legend with coloured boxes, not coloured text
-    from matplotlib.patches import Patch
     legend_elements = [Patch(facecolor=REDDISH_PURPLE, edgecolor=BLACK, linewidth=0.3, label="Cosine"),
                        Patch(facecolor=BLUE, edgecolor=BLACK, linewidth=0.3, label="Euclidean")]
     axes[1].legend(handles=legend_elements, loc="upper left")
@@ -236,8 +235,6 @@ def plot_distance_way_comparison(results_dir: Path, output_dir: Path) -> None:
     fig.tight_layout()
     _save_fig(fig, output_dir, "miniimagenet_distance_way")
 
-
-# ---------- P4: Training way ablation (Figure 4) ----------
 
 def plot_way_ablation(results_dir: Path, output_dir: Path) -> None:
     entries = load_results(results_dir, "miniimagenet_way_ablation")
@@ -273,8 +270,6 @@ def plot_way_ablation(results_dir: Path, output_dir: Path) -> None:
     _save_fig(fig, output_dir, "miniimagenet_way_ablation")
 
 
-# ---------- P5: Transductive vs inductive (5-way) ----------
-
 def plot_transductive(results_dir: Path, output_dir: Path) -> None:
     entries = load_results(results_dir, "miniimagenet_transductive")
     if not entries:
@@ -291,18 +286,21 @@ def plot_transductive(results_dir: Path, output_dir: Path) -> None:
     x = np.arange(len(labels))
     width = 0.3
 
-    bars1 = ax.bar(x - width / 2, [e.accuracy_mean * 100 for e in inductive], width,
-                   yerr=[e.accuracy_ci95 * 100 for e in inductive], capsize=2,
+    ind_means = [e.accuracy_mean * 100 for e in inductive]
+    ind_ci = [e.accuracy_ci95 * 100 for e in inductive]
+    trans_means = [e.accuracy_mean * 100 for e in transductive]
+    trans_ci = [e.accuracy_ci95 * 100 for e in transductive]
+
+    bars1 = ax.bar(x - width / 2, ind_means, width, yerr=ind_ci, capsize=2,
                    color=BLUE, edgecolor=BLACK, linewidth=0.3,
                    error_kw={"linewidth": 0.5})
-    bars2 = ax.bar(x + width / 2, [e.accuracy_mean * 100 for e in transductive], width,
-                   yerr=[e.accuracy_ci95 * 100 for e in transductive], capsize=2,
+    bars2 = ax.bar(x + width / 2, trans_means, width, yerr=trans_ci, capsize=2,
                    color=BLUISH_GREEN, edgecolor=BLACK, linewidth=0.3,
                    error_kw={"linewidth": 0.5})
 
-    for bars in [bars1, bars2]:
-        for bar in bars:
-            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.5,
+    for bars, ci_vals in [(bars1, ind_ci), (bars2, trans_ci)]:
+        for bar, ci in zip(bars, ci_vals, strict=True):
+            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + ci + 0.3,
                     f"{bar.get_height():.1f}", ha="center", va="bottom", fontsize=5)
 
     ax.set_xticks(x)
@@ -310,7 +308,7 @@ def plot_transductive(results_dir: Path, output_dir: Path) -> None:
     ax.set_ylabel("5-way accuracy (%)")
     ax.set_title("Inductive vs transductive, miniImageNet", fontweight="bold")
 
-    from matplotlib.patches import Patch
+
     legend_elements = [Patch(facecolor=BLUE, edgecolor=BLACK, linewidth=0.3, label="Inductive"),
                        Patch(facecolor=BLUISH_GREEN, edgecolor=BLACK, linewidth=0.3, label="Transductive")]
     ax.legend(handles=legend_elements, loc="upper left")
@@ -319,8 +317,6 @@ def plot_transductive(results_dir: Path, output_dir: Path) -> None:
     fig.tight_layout()
     _save_fig(fig, output_dir, "miniimagenet_transductive")
 
-
-# ---------- P6: 10-way results (Bateni Table 2) ----------
 
 def plot_10way(results_dir: Path, output_dir: Path) -> None:
     entries = load_results(results_dir, "miniimagenet_10way")
@@ -338,18 +334,21 @@ def plot_10way(results_dir: Path, output_dir: Path) -> None:
     x = np.arange(len(labels))
     width = 0.3
 
-    bars1 = ax.bar(x - width / 2, [e.accuracy_mean * 100 for e in inductive], width,
-                   yerr=[e.accuracy_ci95 * 100 for e in inductive], capsize=2,
+    ind_means = [e.accuracy_mean * 100 for e in inductive]
+    ind_ci = [e.accuracy_ci95 * 100 for e in inductive]
+    trans_means = [e.accuracy_mean * 100 for e in transductive]
+    trans_ci = [e.accuracy_ci95 * 100 for e in transductive]
+
+    bars1 = ax.bar(x - width / 2, ind_means, width, yerr=ind_ci, capsize=2,
                    color=BLUE, edgecolor=BLACK, linewidth=0.3,
                    error_kw={"linewidth": 0.5})
-    bars2 = ax.bar(x + width / 2, [e.accuracy_mean * 100 for e in transductive], width,
-                   yerr=[e.accuracy_ci95 * 100 for e in transductive], capsize=2,
+    bars2 = ax.bar(x + width / 2, trans_means, width, yerr=trans_ci, capsize=2,
                    color=BLUISH_GREEN, edgecolor=BLACK, linewidth=0.3,
                    error_kw={"linewidth": 0.5})
 
-    for bars in [bars1, bars2]:
-        for bar in bars:
-            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.5,
+    for bars, ci_vals in [(bars1, ind_ci), (bars2, trans_ci)]:
+        for bar, ci in zip(bars, ci_vals, strict=True):
+            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + ci + 0.3,
                     f"{bar.get_height():.1f}", ha="center", va="bottom", fontsize=5)
 
     ax.set_xticks(x)
@@ -357,7 +356,7 @@ def plot_10way(results_dir: Path, output_dir: Path) -> None:
     ax.set_ylabel("10-way accuracy (%)")
     ax.set_title("Inductive vs transductive, miniImageNet 10-way", fontweight="bold")
 
-    from matplotlib.patches import Patch
+
     legend_elements = [Patch(facecolor=BLUE, edgecolor=BLACK, linewidth=0.3, label="Inductive"),
                        Patch(facecolor=BLUISH_GREEN, edgecolor=BLACK, linewidth=0.3, label="Transductive")]
     ax.legend(handles=legend_elements, loc="upper left")
@@ -366,8 +365,6 @@ def plot_10way(results_dir: Path, output_dir: Path) -> None:
     fig.tight_layout()
     _save_fig(fig, output_dir, "miniimagenet_10way")
 
-
-# ---------- P7: Refinement steps sweep (Bateni Figure 6) ----------
 
 def plot_refinement_steps(results_dir: Path, output_dir: Path) -> None:
     entries = load_results(results_dir, "refinement_steps")
@@ -403,7 +400,7 @@ def plot_refinement_steps(results_dir: Path, output_dir: Path) -> None:
         ax.set_title(f"{shot}-shot", fontweight="bold")
         ax.set_xticks(steps)
 
-    from matplotlib.lines import Line2D
+
     legend_elements = [
         Line2D([0], [0], color=BLUISH_GREEN, marker="o", markersize=3, linewidth=1, label="Transductive"),
         Line2D([0], [0], color=BLUE, linewidth=0.5, linestyle="--", label="Inductive baseline"),
@@ -413,8 +410,6 @@ def plot_refinement_steps(results_dir: Path, output_dir: Path) -> None:
     fig.tight_layout()
     _save_fig(fig, output_dir, "refinement_steps")
 
-
-# ---------- P8: CUB zero-shot (Snell Table 3) ----------
 
 def plot_cub_zeroshot(results_dir: Path, output_dir: Path) -> None:
     entries = load_results(results_dir, "cub_zeroshot")
@@ -437,18 +432,23 @@ def plot_cub_zeroshot(results_dir: Path, output_dir: Path) -> None:
     ]
     all_labels = [b[0] for b in baselines] + ["ProtoNet\n(ours)"]
     all_vals = [b[1] for b in baselines] + [e.accuracy_mean * 100]
-    all_ci = [0.0] * len(baselines) + [e.accuracy_ci95 * 100]
 
     n_baselines = len(baselines)
-    colors = [SKY_BLUE] * n_baselines + [VERMILLION]
 
     x = np.arange(len(all_labels))
-    bars = ax.bar(x, all_vals, yerr=all_ci, width=0.6, capsize=2,
-                  color=colors, edgecolor=BLACK, linewidth=0.3,
-                  error_kw={"linewidth": 0.5})
 
-    for bar, val in zip(bars, all_vals, strict=True):
-        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.5,
+    # plot baselines without error bars, then ProtoNet with error bar
+    ax.bar(x[:n_baselines], all_vals[:n_baselines], width=0.6,
+           color=SKY_BLUE, edgecolor=BLACK, linewidth=0.3)
+    protonet_ci = e.accuracy_ci95 * 100
+    ax.bar(x[n_baselines:], all_vals[n_baselines:], width=0.6,
+           yerr=[protonet_ci], capsize=2,
+           color=VERMILLION, edgecolor=BLACK, linewidth=0.3,
+           error_kw={"linewidth": 0.5})
+
+    for i, val in enumerate(all_vals):
+        ci = protonet_ci if i >= n_baselines else 0.0
+        ax.text(x[i], val + ci + 0.5,
                 f"{val:.1f}", ha="center", va="bottom", fontsize=5)
 
     ax.set_xticks(x)
@@ -457,7 +457,7 @@ def plot_cub_zeroshot(results_dir: Path, output_dir: Path) -> None:
     ax.set_title("CUB-200 zero-shot classification", fontweight="bold")
     ax.set_ylim(0, 65)
 
-    from matplotlib.patches import Patch
+
     legend_elements = [
         Patch(facecolor=SKY_BLUE, edgecolor=BLACK, linewidth=0.3, label="Prior work"),
         Patch(facecolor=VERMILLION, edgecolor=BLACK, linewidth=0.3, label="ProtoNet (ours)"),
@@ -467,8 +467,6 @@ def plot_cub_zeroshot(results_dir: Path, output_dir: Path) -> None:
     fig.tight_layout()
     _save_fig(fig, output_dir, "cub_zeroshot")
 
-
-# ---------- Dispatch ----------
 
 class PlotType(Enum):
     OMNIGLOT_FEWSHOT = "omniglot_fewshot"
@@ -493,14 +491,6 @@ PLOT_FUNCTIONS: dict[PlotType, Callable[[Path, Path], None]] = {
 }
 
 
-def plot_all(results_dir: Path, output_dir: Path) -> None:
-    for plot_type, plot_fn in PLOT_FUNCTIONS.items():
-        print(f"\n--- {plot_type.value} ---")
-        plot_fn(results_dir, output_dir)
-
-
-# ---------- CLI ----------
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="Plot evaluation results (Nature style)")
     parser.add_argument("--results-dir", type=str, default="results", help="Directory with JSON results")
@@ -515,7 +505,9 @@ def main() -> None:
         plot_type = PlotType(args.plot)
         PLOT_FUNCTIONS[plot_type](results_dir, output_dir)
     else:
-        plot_all(results_dir, output_dir)
+        for plot_type, plot_fn in PLOT_FUNCTIONS.items():
+            print(f"\n--- {plot_type.value} ---")
+            plot_fn(results_dir, output_dir)
 
 
 if __name__ == "__main__":
