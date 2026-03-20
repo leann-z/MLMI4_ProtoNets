@@ -45,10 +45,18 @@ def _experiment_name(dataset: Dataset, distance: DistanceMetric, way: int, shot:
 
 def _image_config(dataset: Dataset, distance: DistanceMetric, way: int, shot: int) -> TrainConfig:
     n_query = 5 if dataset == Dataset.OMNIGLOT else 15
-    lr_step = 2000 if dataset == Dataset.OMNIGLOT else 20_000
+    lr_step = 2000  # paper: "same learning rate schedule" for both datasets
     return TrainConfig(
-        dataset=dataset, distance=distance, train_way=way, train_shot=shot, n_query=n_query,
-        lr=1e-3, lr_step_every=lr_step, max_episodes=40_000, val_every=500, patience=20,
+        dataset=dataset,
+        distance=distance,
+        train_way=way,
+        train_shot=shot,
+        n_query=n_query,
+        lr=1e-3,
+        lr_step_every=lr_step,
+        max_episodes=20_000,
+        val_every=500,
+        patience=20,
     )
 
 
@@ -67,8 +75,17 @@ def _build_experiments() -> dict[str, TrainConfig]:
                 experiments[_experiment_name(cfg.dataset, cfg.distance, cfg.train_way, cfg.train_shot)] = cfg
 
     experiments["cub_zeroshot"] = TrainConfig(
-        dataset=Dataset.CUB, distance=DistanceMetric.EUCLIDEAN, train_way=50, train_shot=0, n_query=10,
-        lr=1e-4, lr_step_every=999_999, max_episodes=20_000, val_every=200, patience=10, weight_decay=1e-5,
+        dataset=Dataset.CUB,
+        distance=DistanceMetric.EUCLIDEAN,
+        train_way=50,
+        train_shot=0,
+        n_query=10,
+        lr=1e-4,
+        lr_step_every=999_999,
+        max_episodes=20_000,
+        val_every=200,
+        patience=10,
+        weight_decay=1e-5,
     )
 
     return experiments
@@ -155,7 +172,8 @@ def train_cub(config: TrainConfig, output_dir: Path, device: torch.device) -> No
 
     optimizer = torch.optim.Adam(
         list(image_head.parameters()) + list(attr_head.parameters()),
-        lr=config.lr, weight_decay=config.weight_decay,
+        lr=config.lr,
+        weight_decay=config.weight_decay,
     )
 
     best_val_acc = 0.0

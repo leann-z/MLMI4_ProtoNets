@@ -30,6 +30,7 @@ class Benchmark(Enum):
     MINIIMAGENET_TRANSDUCTIVE = "miniimagenet_transductive"
     MINIIMAGENET_10WAY = "miniimagenet_10way"
     REFINEMENT_STEPS = "refinement_steps"
+    OMNIGLOT_REFINEMENT_STEPS = "omniglot_refinement_steps"
     CUB_ZEROSHOT = "cub_zeroshot"
 
 
@@ -58,7 +59,6 @@ class EvalResult:
     episode_accuracies: list[float]
 
 
-# Snell Table 1: Omniglot 5/20-way x 1/5-shot
 _OMNIGLOT_FEWSHOT_CONFIGS = [
     EvalConfig(
         Dataset.OMNIGLOT,
@@ -75,7 +75,6 @@ _OMNIGLOT_FEWSHOT_CONFIGS = [
     for shot in [1, 5]
 ]
 
-# Snell Table 2: miniImageNet 5-way 1/5-shot
 _MINIIMAGENET_FEWSHOT_CONFIGS = [
     EvalConfig(
         Dataset.MINI_IMAGENET,
@@ -101,7 +100,6 @@ _MINIIMAGENET_FEWSHOT_CONFIGS = [
     ),
 ]
 
-# Snell Figure 2 / Table 5: cosine vs euclidean x 5/20-way training
 _MINIIMAGENET_DISTANCE_WAY_CONFIGS = [
     EvalConfig(
         Dataset.MINI_IMAGENET,
@@ -119,7 +117,6 @@ _MINIIMAGENET_DISTANCE_WAY_CONFIGS = [
     for shot in [1, 5]
 ]
 
-# Snell Figure 4 / Table 6: training way ablation
 _MINIIMAGENET_WAY_ABLATION_CONFIGS = [
     EvalConfig(
         Dataset.MINI_IMAGENET,
@@ -136,7 +133,6 @@ _MINIIMAGENET_WAY_ABLATION_CONFIGS = [
     for shot in [1, 5]
 ]
 
-# Snell + Bateni: 5-way transductive vs inductive
 _MINIIMAGENET_TRANSDUCTIVE_CONFIGS = [
     EvalConfig(
         Dataset.MINI_IMAGENET,
@@ -153,7 +149,6 @@ _MINIIMAGENET_TRANSDUCTIVE_CONFIGS = [
     for trans in [False, True]
 ]
 
-# Bateni Table 2: miniImageNet 10-way 1/5-shot (inductive + transductive)
 _MINIIMAGENET_10WAY_CONFIGS = [
     EvalConfig(
         Dataset.MINI_IMAGENET,
@@ -170,7 +165,6 @@ _MINIIMAGENET_10WAY_CONFIGS = [
     for trans in [False, True]
 ]
 
-# Bateni Figure 6 / Table 4: sweep max refinement steps 0..10
 _REFINEMENT_STEPS_CONFIGS = [
     EvalConfig(
         Dataset.MINI_IMAGENET,
@@ -188,7 +182,23 @@ _REFINEMENT_STEPS_CONFIGS = [
     for steps in range(11)
 ]
 
-# Snell Table 3: CUB 50-way 0-shot
+_OMNIGLOT_REFINEMENT_STEPS_CONFIGS = [
+    EvalConfig(
+        Dataset.OMNIGLOT,
+        DistanceMetric.EUCLIDEAN,
+        n_way_test=5,
+        n_shot_test=shot,
+        n_query=5,
+        n_episodes=1000,
+        transductive=True,
+        train_way=60,
+        train_shot=shot,
+        n_refinement_steps=steps,
+    )
+    for shot in [1, 5]
+    for steps in range(11)
+]
+
 _CUB_ZEROSHOT_CONFIGS = [
     EvalConfig(
         Dataset.CUB,
@@ -211,6 +221,7 @@ BENCHMARK_CONFIGS: dict[Benchmark, list[EvalConfig]] = {
     Benchmark.MINIIMAGENET_TRANSDUCTIVE: _MINIIMAGENET_TRANSDUCTIVE_CONFIGS,
     Benchmark.MINIIMAGENET_10WAY: _MINIIMAGENET_10WAY_CONFIGS,
     Benchmark.REFINEMENT_STEPS: _REFINEMENT_STEPS_CONFIGS,
+    Benchmark.OMNIGLOT_REFINEMENT_STEPS: _OMNIGLOT_REFINEMENT_STEPS_CONFIGS,
     Benchmark.CUB_ZEROSHOT: _CUB_ZEROSHOT_CONFIGS,
 }
 
@@ -344,7 +355,7 @@ def _config_tag(benchmark: Benchmark, config: EvalConfig) -> str:
         tag += f"_train{config.train_way}way_{config.distance.value}"
     if benchmark in {Benchmark.MINIIMAGENET_TRANSDUCTIVE, Benchmark.MINIIMAGENET_10WAY}:
         tag += f"_trans{config.transductive}"
-    if benchmark == Benchmark.REFINEMENT_STEPS:
+    if benchmark in {Benchmark.REFINEMENT_STEPS, Benchmark.OMNIGLOT_REFINEMENT_STEPS}:
         tag += f"_steps{config.n_refinement_steps}"
     return tag
 
@@ -394,15 +405,20 @@ def run_single_eval(
     serialized_config["distance"] = config.distance.value
     result_path = output_dir / f"{benchmark.value}_{tag}.json"
     result_path.parent.mkdir(parents=True, exist_ok=True)
-    result_path.write_text(json.dumps({
-        "benchmark": result.benchmark,
-        "config": serialized_config,
-        "model_checkpoint": result.model_checkpoint,
-        "accuracy_mean": result.accuracy_mean,
-        "accuracy_std": result.accuracy_std,
-        "accuracy_ci95": result.accuracy_ci95,
-        "episode_accuracies": result.episode_accuracies,
-    }, indent=2))
+    result_path.write_text(
+        json.dumps(
+            {
+                "benchmark": result.benchmark,
+                "config": serialized_config,
+                "model_checkpoint": result.model_checkpoint,
+                "accuracy_mean": result.accuracy_mean,
+                "accuracy_std": result.accuracy_std,
+                "accuracy_ci95": result.accuracy_ci95,
+                "episode_accuracies": result.episode_accuracies,
+            },
+            indent=2,
+        ),
+    )
     print(f"  Saved: {result_path}")
     return result
 
