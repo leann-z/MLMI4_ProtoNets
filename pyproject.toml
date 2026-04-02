@@ -1,0 +1,58 @@
+[project]
+name = "mlmi4-protonets"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12, <4"
+dependencies = [
+    "einops>=0.8.2",
+    "jaxtyping>=0.3.9",
+    "matplotlib>=3.10.8",
+    "numpy>=2.4.2",
+    "scikit-learn>=1.8.0",
+    "seaborn>=0.13.2",
+    "torch>=2.10.0",
+    "torchvision>=0.25.0",
+    "tqdm>=4.67.3",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 119
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "C408",
+    "C901",
+    "D",
+    "EM101",
+    "EM102",
+    "ERA001",
+    "FIX002",
+    "F722",
+    "FBT001",
+    "FBT002",
+    "N812",
+    "PD008",
+    "PGH003",
+    "PLC0415",
+    "PLR0904",
+    "PLR0912",
+    "PLR0913",
+    "PLR0915",
+    "PLR0917",
+    "PLR2004",
+    "PLR6301",
+    "PT",
+    "PTH123",
+    "RET503",
+    "RET504",
+    "RUF005",
+    "S",
+    "SIM108",
+    "T20",
+    "TD003",
+    "TRY003",
+    "CPY001"
+]
